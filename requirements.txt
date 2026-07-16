@@ -1,0 +1,6 @@
+aiogram>=3.29
+httpx>=0.28
+staticmap>=0.5.7
+Pillow>=10
+python-dotenv>=1.0
+aiosqlite>=0.20

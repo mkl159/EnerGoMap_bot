@@ -1,0 +1,21 @@
+# Secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Données téléchargées / caches
+data/
+*.sqlite3
+*.db
+
+# Divers
+.DS_Store
+
+# Fichiers de session personnels (journal de travail, instructions Claude)
+CLAUDE.md
+JOURNAL.md
