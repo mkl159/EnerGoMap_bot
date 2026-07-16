@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
@@ -17,15 +19,22 @@ from aiogram.types import (
 )
 
 from . import db
-from .config import ELEC_CODE, FUELS, RATE_LIMIT_SECONDS, TOP_N
+from .config import ELEC_CODE, FUELS, MAX_ALERTS_PER_USER, RATE_LIMIT_SECONDS, TOP_N
 from .ev_api import EvStation, fetch_ev_candidates, pick_top_ev
 from .fuel_api import Station, all_national_stats, fetch_candidates, national_stats
 from .keyboards import (
+    alert_threshold_keyboard,
+    alerts_list_keyboard,
     fuel_keyboard,
     location_keyboard,
     nav_keyboard,
     results_keyboard,
 )
+
+
+class AlertForm(StatesGroup):
+    """Saisie libre du seuil d'alerte prix."""
+    amount = State()
 from .mapgen import render_map
 from .routing import add_road_distances, pick_top
 
@@ -187,8 +196,11 @@ async def cmd_aide(message: Message) -> None:
         "3. Je vous montre le <b>top 5</b> des stations (prix + distance "
         "voiture) sur une carte.\n"
         "4. Touchez un numéro pour ouvrir l'itinéraire dans Google Maps, "
-        "Apple Plans ou Waze.\n\n"
-        "/stats : prix nationaux de tous les carburants.\n\n"
+        "Apple Plans ou Waze.\n"
+        "5. 🔔 Sur la fiche d'une station, créez une <b>alerte prix</b> : je "
+        "vous préviens quand elle passe sous votre seuil.\n\n"
+        "/stats : prix nationaux de tous les carburants.\n"
+        "/alertes : gérer vos alertes prix.\n\n"
         "🔒 Votre position n'est <b>jamais enregistrée</b>.\n"
         "Données : prix-carburants.gouv.fr · Cartes © OpenStreetMap/CARTO"
     )
@@ -305,6 +317,7 @@ async def _run_search(message: Message, uid: int, fuel_code: str,
 
         _store(sent.chat.id, sent.message_id, {
             "kind": "fuel",
+            "fuel": fuel_code,
             "stations": top,
             "caption": caption,
             "lat": lat,
@@ -424,14 +437,16 @@ async def cb_station(callback: CallbackQuery) -> None:
             f"{s.pmax:g} kW · {s.npdc} prise{'s' if s.npdc > 1 else ''} · "
             f"{html.escape(s.operator[:30])} — {_dist_str(s)}"
         )
+        alert_idx = None  # pas de prix élec en open data → pas d'alerte
     else:
         detail = f"{s.price:.3f} € — {_dist_str(s)}"
+        alert_idx = idx
     caption = (
         f"🧭 <b>[{idx + 1}] {html.escape(s.name[:60])}</b>\n"
         f"{detail}\n\n"
         "<b>Où voulez-vous envoyer cet itinéraire ?</b>"
     )
-    await _safe_edit(callback.message, caption, nav_keyboard(s))
+    await _safe_edit(callback.message, caption, nav_keyboard(s, alert_idx))
 
 
 @router.callback_query(F.data == "back")
@@ -470,6 +485,155 @@ async def cb_redo(callback: CallbackQuery) -> None:
                           ctx["lat"], ctx["lon"])
 
 
+# --- Alertes prix (🔔) ---------------------------------------------------------
+
+def _fuel_station_from_ctx(callback: CallbackQuery, idx: int):
+    """Récupère (ctx, station) d'un message résultats carburant, ou None."""
+    key = f"{callback.message.chat.id}:{callback.message.message_id}"
+    ctx = _RESULTS.get(key)
+    if not ctx or ctx.get("kind") != "fuel" or idx >= len(ctx["stations"]):
+        return None, None
+    return ctx, ctx["stations"][idx]
+
+
+@router.callback_query(F.data.startswith("al:"))
+async def cb_alert(callback: CallbackQuery) -> None:
+    idx = int(callback.data.split(":", 1)[1])
+    ctx, s = _fuel_station_from_ctx(callback, idx)
+    if not s:
+        await callback.answer("Résultats expirés — /position pour relancer.",
+                              show_alert=True)
+        return
+    if await db.count_alerts(callback.from_user.id) >= MAX_ALERTS_PER_USER:
+        await callback.answer(
+            f"Limite de {MAX_ALERTS_PER_USER} alertes atteinte — "
+            "supprimez-en via /alertes.", show_alert=True)
+        return
+    await callback.answer()
+    fuel = FUELS[ctx["fuel"]]
+    await _safe_edit(
+        callback.message,
+        f"🔔 <b>Alerte prix — {html.escape(s.name[:50])}</b>\n"
+        f"{fuel.short} actuellement à <b>{s.price:.3f} €</b>.\n\n"
+        "<b>Me prévenir si le prix passe sous :</b>",
+        alert_threshold_keyboard(idx, s.price),
+    )
+
+
+async def _create_alert(uid: int, ctx: dict, s: Station, threshold: float) -> str:
+    await db.add_alert(uid, s.sid, s.name, s.lat, s.lon, ctx["fuel"], threshold)
+    fuel = FUELS[ctx["fuel"]]
+    return (
+        f"🔔 <b>Alerte créée !</b>\n"
+        f"Je vous préviens si <b>{fuel.short}</b> passe sous "
+        f"<b>{threshold:.3f} €</b> à :\n📍 {html.escape(s.name[:60])}\n\n"
+        f"<i>Vérification toutes les 15 min · gérez vos alertes avec /alertes</i>"
+    )
+
+
+@router.callback_query(F.data.startswith("alset:"))
+async def cb_alert_set(callback: CallbackQuery) -> None:
+    _, idx_str, thr_str = callback.data.split(":", 2)
+    idx = int(idx_str)
+    ctx, s = _fuel_station_from_ctx(callback, idx)
+    if not s:
+        await callback.answer("Résultats expirés — /position pour relancer.",
+                              show_alert=True)
+        return
+    text = await _create_alert(callback.from_user.id, ctx, s, float(thr_str))
+    await callback.answer("Alerte créée ✅")
+    await callback.message.answer(text)
+    # retour à la fiche station
+    await _safe_edit(callback.message, ctx["caption"],
+                     results_keyboard(len(ctx["stations"])))
+
+
+@router.callback_query(F.data.startswith("alcustom:"))
+async def cb_alert_custom(callback: CallbackQuery, state: FSMContext) -> None:
+    idx = int(callback.data.split(":", 1)[1])
+    ctx, s = _fuel_station_from_ctx(callback, idx)
+    if not s:
+        await callback.answer("Résultats expirés — /position pour relancer.",
+                              show_alert=True)
+        return
+    await callback.answer()
+    await state.set_state(AlertForm.amount)
+    await state.update_data(sid=s.sid, name=s.name, lat=s.lat, lon=s.lon,
+                            fuel=ctx["fuel"], price=s.price)
+    await callback.message.answer(
+        f"✏️ Envoyez le prix seuil en euros (ex : <b>{s.price - 0.03:.2f}</b>).\n"
+        "Tapez /annuler pour abandonner."
+    )
+
+
+@router.message(Command("annuler"), StateFilter(AlertForm.amount))
+async def cmd_annuler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("❌ Création d'alerte annulée.")
+
+
+@router.message(F.text, StateFilter(AlertForm.amount))
+async def msg_alert_amount(message: Message, state: FSMContext) -> None:
+    raw = message.text.replace(",", ".").replace("€", "").strip()
+    try:
+        threshold = float(raw)
+    except ValueError:
+        await message.answer("🤔 Je n'ai pas compris. Envoyez un prix comme "
+                             "<b>1.65</b> (ou /annuler).")
+        return
+    if not 0.3 <= threshold <= 3.5:
+        await message.answer("⚠️ Prix hors limites (0.30 – 3.50 €). Réessayez "
+                             "(ou /annuler).")
+        return
+    data = await state.get_data()
+    await state.clear()
+    fake_ctx = {"fuel": data["fuel"]}
+    s = Station(sid=data["sid"], name=data["name"], ville="", lat=data["lat"],
+                lon=data["lon"], price=data["price"], price_date=None)
+    text = await _create_alert(message.from_user.id, fake_ctx, s, threshold)
+    await message.answer(text)
+
+
+@router.message(Command("alertes"))
+async def cmd_alertes(message: Message) -> None:
+    alerts = await db.list_alerts(message.from_user.id)
+    if not alerts:
+        await message.answer(
+            "🔕 Aucune alerte active.\n\nPour en créer une : faites une "
+            "recherche (📍 /position), touchez un numéro puis "
+            "« 🔔 M'alerter si le prix baisse »."
+        )
+        return
+    lines = ["🔔 <b>Vos alertes actives</b> (touchez pour supprimer) :\n"]
+    for i, a in enumerate(alerts, start=1):
+        fuel = FUELS.get(a["fuel"])
+        lines.append(
+            f"{i}. {html.escape(a['station_name'][:40])}\n"
+            f"     {fuel.short if fuel else a['fuel']} ≤ <b>{a['threshold']:.3f} €</b>"
+        )
+    await message.answer("\n".join(lines), reply_markup=alerts_list_keyboard(alerts))
+
+
+@router.callback_query(F.data.startswith("aldel:"))
+async def cb_alert_delete(callback: CallbackQuery) -> None:
+    alert_id = int(callback.data.split(":", 1)[1])
+    await db.delete_alert(alert_id, callback.from_user.id)
+    alerts = await db.list_alerts(callback.from_user.id)
+    await callback.answer("Alerte supprimée 🗑")
+    if alerts:
+        lines = ["🔔 <b>Vos alertes actives</b> (touchez pour supprimer) :\n"]
+        for i, a in enumerate(alerts, start=1):
+            fuel = FUELS.get(a["fuel"])
+            lines.append(
+                f"{i}. {html.escape(a['station_name'][:40])}\n"
+                f"     {fuel.short if fuel else a['fuel']} ≤ <b>{a['threshold']:.3f} €</b>"
+            )
+        await _safe_edit(callback.message, "\n".join(lines),
+                         alerts_list_keyboard(alerts))
+    else:
+        await _safe_edit(callback.message, "🔕 Aucune alerte active.")
+
+
 @router.callback_query(F.data == "tesla")
 async def cb_tesla(callback: CallbackQuery) -> None:
     await callback.answer(
@@ -481,7 +645,7 @@ async def cb_tesla(callback: CallbackQuery) -> None:
 
 # --- Fallback : tout autre message --------------------------------------------
 
-@router.message(F.text)
+@router.message(F.text, StateFilter(None))
 async def fallback(message: Message) -> None:
     fuel = await db.get_fuel(message.from_user.id)
     if not fuel:
@@ -492,5 +656,6 @@ async def fallback(message: Message) -> None:
             "📍 /position — chercher autour de vous\n"
             "⛽ /carburant — changer d'énergie\n"
             "📊 /stats — prix nationaux\n"
+            "🔔 /alertes — mes alertes prix\n"
             "ℹ️ /aide — aide",
         )

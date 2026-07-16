@@ -24,6 +24,7 @@
 | 🗺 **Carte annotée** | Top 5 numéroté sur une carte générée à la volée |
 | 📊 **Stats nationales** | Min / médiane / max France pour chaque carburant |
 | 🧭 **Navigation 1-clic** | Google Maps · Apple Plans · Waze |
+| 🔔 **Alertes prix** | Soyez prévenu quand une station passe sous votre seuil |
 | ⚠️ **Ruptures détectées** | Les stations en rupture sont exclues et signalées |
 | 🔒 **RGPD friendly** | Votre position n'est **jamais** enregistrée |
 
@@ -119,7 +120,16 @@ cp .env.example .env        # ✏️ éditez .env et collez votre token
 | `/position` | 📍 Chercher autour de moi |
 | `/carburant` | ⛽ Changer d'énergie (Gazole, SP95… ou ⚡) |
 | `/stats` | 📊 Prix nationaux de tous les carburants |
+| `/alertes` | 🔔 Gérer mes alertes prix |
 | `/aide` | ℹ️ Aide et confidentialité |
+
+### 🔔 Alertes prix
+
+Sur la fiche d'une station (après avoir touché un numéro), le bouton
+**« 🔔 M'alerter si le prix baisse »** propose un seuil (−2 ct, −5 ct,
+−10 ct ou montant libre ✏️). Le bot vérifie les prix **toutes les 15 min**
+et vous envoie une notification avec les boutons d'itinéraire dès que le
+seuil est franchi. Jusqu'à 10 alertes actives, gérées via `/alertes`.
 
 ## 🏗 Architecture
 
@@ -166,8 +176,8 @@ Matrix OSRM pour les distances voiture → scoring `prix + 0,5 × distance`
 
 - [x] ⛽ Carburants + ⚡ bornes électriques
 - [x] 🗺 Carte annotée + navigation Google/Apple/Waze
+- [x] 🔔 Alertes prix (« préviens-moi si le Gazole passe sous 1,65 € »)
 - [ ] 🔌 Envoi direct de la destination à une **Tesla** (Fleet API, OAuth)
-- [ ] 🔔 Alertes prix (« préviens-moi si le Gazole passe sous 1,65 € »)
 - [ ] 🖥 OSRM auto-hébergé + webhook (montée en charge)
 
 ## 📄 Licence

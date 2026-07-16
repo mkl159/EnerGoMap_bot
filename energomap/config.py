@@ -28,6 +28,7 @@ STATS_CACHE_TTL = 600        # 10 min
 PRICE_MAX_AGE_DAYS = 7       # prix plus vieux → ignorés
 RATE_LIMIT_SECONDS = 3
 DIST_WEIGHT = 0.5            # α du scoring : prix_norm + α * dist_norm
+MAX_ALERTS_PER_USER = 10     # alertes prix actives max par utilisateur
 
 
 @dataclass(frozen=True)

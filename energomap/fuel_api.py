@@ -127,6 +127,30 @@ async def fetch_candidates(lat: float, lon: float, fuel: Fuel) -> SearchResult:
     return SearchResult([], SEARCH_RADII[-1], 0)
 
 
+async def fetch_prices_by_ids(station_ids: list[int]) -> dict[int, dict]:
+    """Prix actuels d'une liste de stations (pour le worker d'alertes).
+
+    Retourne {station_id: record ODS} — les colonnes *_prix y figurent.
+    """
+    out: dict[int, dict] = {}
+    if not station_ids:
+        return out
+    price_cols = ", ".join(f.price_col for f in FUELS.values())
+    async with httpx.AsyncClient(timeout=20) as client:
+        for i in range(0, len(station_ids), 90):  # batchs sous la limite ODS
+            batch = station_ids[i:i + 90]
+            params = {
+                "select": f"id, {price_cols}",
+                "where": f"id in ({', '.join(str(s) for s in batch)})",
+                "limit": "100",
+            }
+            resp = await client.get(ODS_BASE, params=params)
+            resp.raise_for_status()
+            for rec in resp.json().get("results", []):
+                out[rec["id"]] = rec
+    return out
+
+
 # --- Statistiques nationales (cache 10 min) --------------------------------
 
 _stats_cache: dict[str, tuple[float, dict]] = {}

@@ -8,6 +8,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
 from energomap import db
+from energomap.alerts import alert_watcher
 from energomap.config import BOT_TOKEN
 from energomap.handlers import router
 
@@ -23,6 +24,7 @@ COMMANDS = [
     BotCommand(command="position", description="📍 Chercher autour de moi"),
     BotCommand(command="carburant", description="⛽ Changer d'énergie"),
     BotCommand(command="stats", description="📊 Prix nationaux"),
+    BotCommand(command="alertes", description="🔔 Mes alertes prix"),
     BotCommand(command="aide", description="ℹ️ Aide"),
 ]
 
@@ -35,7 +37,11 @@ async def main() -> None:
     await bot.set_my_commands(COMMANDS)
     me = await bot.get_me()
     logging.info("Bot démarré : @%s (id=%s)", me.username, me.id)
-    await dp.start_polling(bot)
+    watcher = asyncio.create_task(alert_watcher(bot))  # 🔔 worker alertes prix
+    try:
+        await dp.start_polling(bot)
+    finally:
+        watcher.cancel()
 
 
 if __name__ == "__main__":
